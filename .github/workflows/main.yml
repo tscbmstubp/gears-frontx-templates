@@ -1,0 +1,284 @@
+name: Main CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  # Lets a run be triggered by hand on a fork branch before upstream Actions
+  # are enabled for it (a fork's push/pull_request triggers stay dormant
+  # until a maintainer approves the fork's Actions) - template-drift.yml
+  # already has this for the same reason.
+  workflow_dispatch:
+
+# Every job here only reads the repo: nothing pushes, comments, or releases.
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+        # policy:version-bump-on-change needs a merge base with the PR's
+        # target branch, and a shallow (depth-1) checkout has no history to
+        # compute one from.
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: '25.x'
+        cache: 'npm'
+
+    - name: Enable Corepack
+      run: corepack enable
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run scripts test suite
+      run: npm test
+
+    # Prepublish manifest + content self-containment validation (`frontx
+    # validate`) against every template at the repo root (a directory
+    # carrying `frontx-template.json`, ADR-0018 - not a `template-*` name
+    # guess). `@gears-frontx/cli` comes from the registry (a devDependency
+    # here), not a local build, so this needs no build step first.
+    - name: Validate template manifests (prepublish, content self-containment)
+      run: npm run validate:templates
+
+    # Every pinned ecosystem package (@gears-frontx/api, mfes, gts-plugin,
+    # ...) at an exact registry version must actually exist on the registry.
+    # Registry mode (no FRONTX_ECOSYSTEM_DIR here) - see README.md and
+    # scripts/template-ecosystem-packages.mjs for the sibling-checkout mode
+    # this same script also runs in, from template-drift.yml's own pin-drift
+    # step (which has a gears-frontx checkout on disk to point it at).
+    - name: Check template ecosystem pin-drift
+      run: npm run policy:template-pin-drift
+
+    # #575's gate, moved here with the templates: a governed root
+    # (template-shell itself, or a template-shell/packages/* workspace
+    # member) whose src/ or package.json dependencies changed must also bump
+    # its own version, in the same PR. Pull-request-only: the merge base it
+    # needs is the PR's base branch, only present as GITHUB_BASE_REF on
+    # pull_request events.
+    - name: Check version bump on substantive template change
+      if: github.event_name == 'pull_request'
+      run: npm run policy:version-bump-on-change
+
+    # #524: npm reconciling an out-of-sync template lockfile drops the
+    # template's file:. self-link entry, writing a lockfile its own `npm ci`
+    # then rejects. This asserts every self-link a template declares still
+    # has its lockfile entry.
+    - name: Check template lockfile self-link entries
+      run: npm run policy:template-lockfile-selflink
+
+    # Template design tokens are full CSS colors consumed as var(--x), never
+    # shadcn-style HSL fragments consumed as hsl(var(--x)).
+    - name: Check template token format (full-color vocabulary)
+      run: npm run policy:token-format
+
+    # The design-guardrails bundle routes guideline loading through the
+    # generated reference-artifacts/guideline-index.json, derived from each
+    # guideline's front matter. This asserts the checked-in index matches it.
+    - name: Check guideline index is generated from front matter
+      run: npm run policy:guideline-index
+
+  # template-shell and template-mfe carry their own arch:deps / lint /
+  # test:unit scripts, and nothing else in this workflow enters them - so
+  # without this job their checks are enforced only when someone runs them by
+  # hand, and they rot (#483).
+  #
+  # Two kinds of template, both need covering:
+  #   - self-contained (template-shell): root package.json and lockfile of
+  #     its own, validated standalone by the glob loop below, which
+  #     deliberately avoids hardcoding template names;
+  #   - add-only overlay (template-mfe): no root package.json, no tooling of
+  #     its own. It cannot be validated in place - its packages' file: links
+  #     resolve to template-mfe/../template-shell, and its vite/vitest
+  #     configs import out of the shell. The only way to run its checks is to
+  #     compose the pair the way `frontx add` does and validate the result,
+  #     which the second step does.
+  template-validate:
+    name: Template Validate
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: '25.x'
+        cache: 'npm'
+        cache-dependency-path: |
+          template-*/package-lock.json
+
+    - name: Enable Corepack
+      run: corepack enable
+
+    # Split the templates by what their manifests CLAIM, not by what happens
+    # to sit on disk. A template that declares "package.json" among its
+    # ownership boundaries owns its own tooling and is validated standalone;
+    # one that does not is an add-only overlay and is only meaningful
+    # composed onto a shell.
+    - name: Classify templates
+      run: |
+        set -euo pipefail
+        node -e '
+          const fs = require("fs");
+          const selfContained = [], overlays = [];
+          for (const dir of fs.readdirSync(".").filter((d) => d.startsWith("template-")).sort()) {
+            if (!fs.existsSync(dir + "/frontx-template.json")) continue;
+            const b = JSON.parse(fs.readFileSync(dir + "/frontx-template.json", "utf8")).ownershipBoundaries || {};
+            if ((b.sharedFiles || []).length) {
+              throw new Error(dir + " declares ownershipBoundaries.sharedFiles, which this job does not classify or compose — extend \"Classify templates\" and \"Validate shell + overlay composition\" to handle it before adding one");
+            }
+            const claims = b.exclusiveSubtrees || [];
+            (claims.includes("package.json") ? selfContained : overlays).push(dir);
+          }
+          if (!selfContained.length) throw new Error("no self-contained template found");
+          console.log("self-contained: " + selfContained.join(" "));
+          console.log("overlays: " + (overlays.join(" ") || "(none)"));
+          fs.appendFileSync(process.env.GITHUB_ENV,
+            `SELF_CONTAINED_TEMPLATES=${selfContained.join(" ")}\n` +
+            `OVERLAY_TEMPLATES=${overlays.join(" ")}\n`);
+        '
+
+    # Both template steps below run their installs from a copy placed OUTSIDE
+    # the checkout, so no ancestor node_modules (this job installs none at the
+    # repo root at all) can supply what a template's own lockfile fails to
+    # install - the same graph a standalone `frontx seed` gets outside this
+    # repo entirely.
+    - name: Validate self-contained templates
+      run: |
+        set -euo pipefail
+        for template in $SELF_CONTAINED_TEMPLATES; do
+          echo "==> Validating $template"
+          isolated="$RUNNER_TEMP/standalone-$(basename "$template")"
+          rm -rf "$isolated" && mkdir -p "$isolated"
+          tar -C "$template" --exclude=node_modules -cf - . | tar -C "$isolated" -xf -
+          (
+            cd "$isolated"
+            npm ci
+            npm run build
+            npm run type-check
+            npm run arch:deps
+            npm run lint
+            npm run test:unit
+          )
+        done
+
+    # Composes the overlays onto the shell and runs the shell's checks over
+    # the union - the tree a real `frontx seed shell && frontx add mfe`
+    # produces. Every pin the composed tree carries is already a real
+    # published registry version (this repo has no unpublished ecosystem
+    # source to substitute the way the old in-monorepo job did), so this is a
+    # plain `npm install` with nothing rewritten first.
+    - name: Validate shell + overlay composition
+      run: |
+        set -euo pipefail
+
+        # shellcheck disable=SC2086
+        set -- $SELF_CONTAINED_TEMPLATES
+        if [ "$#" -ne 1 ]; then
+          echo "::error::composition needs exactly one self-contained template, got: $*"
+          exit 1
+        fi
+        shell="$1"
+
+        if [ -z "${OVERLAY_TEMPLATES// /}" ]; then
+          echo "::error::no overlay templates found — this step would be a no-op"
+          exit 1
+        fi
+
+        composed_total=0
+        for overlay in $OVERLAY_TEMPLATES; do
+          subtrees="$(node -e '
+            const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            const s = m.ownershipBoundaries && m.ownershipBoundaries.exclusiveSubtrees;
+            if (!s || !s.length) {
+              console.error("no exclusiveSubtrees declared in " + process.argv[1]);
+              process.exit(1);
+            }
+            console.log(s.join("\n"));
+          ' "$overlay/frontx-template.json")"
+
+          overlay_count=0
+          overlay_has_pkg=0
+          while read -r subtree; do
+            [ -n "$subtree" ] || continue
+            if [ -n "$(find "$overlay/$subtree" -not -path '*/node_modules/*' \
+              -name package.json -print -quit 2>/dev/null)" ]; then
+              overlay_has_pkg=1
+            fi
+            if [ -d "$overlay/$subtree" ]; then
+              if [ -e "$shell/${subtree%/}" ]; then
+                echo "::error::$overlay's exclusiveSubtree '$subtree' is already occupied in $shell"
+                exit 1
+              fi
+              echo "==> Overlaying $overlay/$subtree"
+              mkdir -p "$shell/${subtree%/}"
+              cp -R "$overlay/$subtree/." "$shell/${subtree%/}/"
+            elif [ -f "$overlay/$subtree" ]; then
+              if [ -e "$shell/$subtree" ]; then
+                echo "::error::$overlay's exclusiveSubtree '$subtree' is already occupied in $shell"
+                exit 1
+              fi
+              echo "==> Overlaying $overlay/$subtree (file)"
+              mkdir -p "$shell/$(dirname "$subtree")"
+              cp "$overlay/$subtree" "$shell/$subtree"
+            else
+              echo "::error::$overlay declares exclusiveSubtree '$subtree', which does not exist"
+              exit 1
+            fi
+            find "$shell/${subtree%/}" -not -path '*/node_modules/*' \
+              -name package-lock.json -delete
+            subtree_count="$(find "$shell/${subtree%/}" -not -path '*/node_modules/*' \
+              -name package.json 2>/dev/null | wc -l)"
+            overlay_count=$((overlay_count + subtree_count))
+          done <<< "$subtrees"
+
+          if [ "$overlay_has_pkg" -eq 0 ]; then
+            echo "==> $overlay is manifest-only; composed without MFE packages (by design)"
+            continue
+          fi
+
+          if [ "$overlay_count" -eq 0 ]; then
+            echo "::error::$overlay's exclusiveSubtrees exist but contain no MFE package (no package.json found)"
+            exit 1
+          fi
+          echo "==> $overlay contributed $overlay_count MFE package(s)"
+          composed_total=$((composed_total + overlay_count))
+        done
+        echo "==> Composed $composed_total MFE package(s) into $shell"
+
+        composed="$RUNNER_TEMP/composed-$(basename "$shell")"
+        rm -rf "$composed" && mkdir -p "$composed"
+        tar -C "$shell" --exclude=node_modules -cf - . | tar -C "$composed" -xf -
+
+        cd "$composed"
+        # npm install, not npm ci: the shell's committed lockfile is generated
+        # without the overlay, so it has no mfe_packages entries and `ci`
+        # would fail as out of sync.
+        npm install
+
+        # FRONTX_INCLUDE_TEMPLATE_EXAMPLES=1 on both commands below, because
+        # every MFE package this job composes is one the template ships as an
+        # example and declares "templateExample": true. Without the opt-in the
+        # package scanners skip all of them and this job — the only CI path
+        # that compiles the overlaid MFEs at all — passes having compiled
+        # nothing.
+        FRONTX_INCLUDE_TEMPLATE_EXAMPLES=1 npm run build
+        FRONTX_INCLUDE_TEMPLATE_EXAMPLES=1 npm run type-check
+        npm run arch:deps
+        npm run lint
+        npm run test:unit

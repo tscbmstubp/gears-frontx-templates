@@ -1,0 +1,28 @@
+{
+  "name": "gears-frontx-templates",
+  "version": "0.1.0",
+  "description": "FrontX templates (template-shell, template-mfe, template-design-guardrails) consumed by the FrontX CLI via github:constructorfabric/gears-frontx-templates//<template>@<ref> - see README.md.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.14.0",
+    "npm": ">=10.0.0"
+  },
+  "packageManager": "npm@10.9.4",
+  "scripts": {
+    "test": "vitest --run",
+    "test:watch": "vitest --watch",
+    "dev:template:link": "node scripts/link-template-ecosystem.mjs",
+    "validate:templates": "node scripts/validate-templates.mjs",
+    "policy:template-pin-drift": "node scripts/template-pin-drift-check.mjs",
+    "policy:template-lockfile-selflink": "node scripts/template-lockfile-selflink-check.mjs",
+    "policy:token-format": "node scripts/token-format-check.mjs",
+    "policy:guideline-index": "node scripts/generate-guideline-index.mjs --check",
+    "generate:guideline-index": "node scripts/generate-guideline-index.mjs",
+    "policy:version-bump-on-change": "node scripts/version-bump-on-change-check.mjs"
+  },
+  "devDependencies": {
+    "@gears-frontx/cli": "0.3.0-alpha.4",
+    "vitest": "4.1.4"
+  }
+}
