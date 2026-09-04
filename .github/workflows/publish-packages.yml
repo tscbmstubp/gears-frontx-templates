@@ -1,0 +1,239 @@
+# Publishes @gears-frontx/frontx-template-shell and its publishable workspace
+# subpackages (template-shell/packages/*), version-gated, in dependency order.
+# Moved here from gears-frontx's own publish-packages.yml PART 2 when the
+# templates moved into this repo.
+#
+# HARD PREREQUISITE, not enforced by this workflow: `npm ci` in template-shell
+# resolves @gears-frontx/api, mfes and gts-plugin from the registry at exact
+# pinned versions. This workflow must run AFTER gears-frontx's own publish
+# workflow has published whatever version this repo's pins name - the two
+# repos can't see each other's workflow runs, so that ordering is a release
+# discipline (bump the ecosystem, let it publish, THEN bump the template's
+# pins to match and let this publish), not something CI enforces for you.
+# `policy:template-pin-drift` (main.yml) at least confirms the pinned version
+# already exists on the registry before this ever runs.
+#
+# REQUIRES an `NPM_TOKEN` repository secret (read below at `publish-template`
+# - `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`) scoped to publish under the
+# `@gears-frontx` npm org. Without it every `npm publish` in this workflow
+# fails authentication; nothing here creates or validates the secret.
+#
+# THE FIRST RUN ON A NEW BRANCH sees every governed manifest as "changed"
+# with an empty old version: `detect-template`'s `git show "$BASE_COMMIT"`
+# has no `$BASE_COMMIT` to read the first time a branch's history doesn't
+# reach one (a fresh branch, or `github.event.before` being the all-zeros
+# SHA), so `OLD_VERSION` falls back to `""`, which never equals `NEW_VERSION`
+# - every package with a version looks bumped. That is safe ONLY because
+# `publish-template`'s own runtime check (`npm view "$NAME@$VERSION" version`)
+# skips anything already on the registry - so a first run against already-
+# published versions publishes nothing twice; it would only actually publish
+# if a version were both new to this branch's history AND not yet on the
+# registry, which is the same condition that makes it correct to publish on
+# every other run too.
+name: Publish Packages
+
+on:
+  push:
+    branches: [main, 'release/v*']
+
+permissions:
+  contents: read
+
+jobs:
+  detect-template:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.detect.outputs.packages }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect version changes
+        id: detect
+        run: |
+          PACKAGES=()
+          BASE_COMMIT="${{ github.event.before }}"
+          echo "Comparing HEAD against pre-push state: $BASE_COMMIT"
+
+          # The template package itself + every workspace subpackage.
+          MANIFESTS=$(printf '%s\n' \
+            "template-shell/package.json" \
+            template-shell/packages/*/package.json \
+            template-shell/src-app/mfe_packages/*/package.json)
+
+          for pkg_json in $MANIFESTS; do
+            [ -f "$pkg_json" ] || continue
+
+            # Private packages can never be published — skip them.
+            IS_PRIVATE=$(jq -r '.private // false' "$pkg_json")
+            if [ "$IS_PRIVATE" = "true" ]; then continue; fi
+
+            if git diff "$BASE_COMMIT" --name-only | grep -q "^${pkg_json}$"; then
+              OLD_VERSION=$(git show "$BASE_COMMIT":"$pkg_json" 2>/dev/null | jq -r '.version' || echo "")
+              NEW_VERSION=$(jq -r '.version' "$pkg_json")
+              NPM_NAME=$(jq -r '.name' "$pkg_json")
+              PKG_PATH=$(dirname "$pkg_json")
+
+              if [ "$OLD_VERSION" != "$NEW_VERSION" ] && [ -n "$NEW_VERSION" ]; then
+                echo "Version change detected: $NPM_NAME $OLD_VERSION -> $NEW_VERSION"
+                PACKAGES+=("{\"name\":\"$NPM_NAME\",\"path\":\"$PKG_PATH\",\"version\":\"$NEW_VERSION\"}")
+              fi
+            fi
+          done
+
+          if [ ${#PACKAGES[@]} -eq 0 ]; then
+            echo "No template packages with version changes"
+            echo "packages=[]" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            JSON_ARRAY=$(printf '%s\n' "${PACKAGES[@]}" | jq -sc '.')
+            echo "packages=$JSON_ARRAY" >> $GITHUB_OUTPUT
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+  publish-template:
+    needs: [detect-template]
+    if: needs.detect-template.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+      skipped: ${{ steps.publish.outputs.skipped }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '25.x'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install + build template
+        working-directory: template-shell
+        run: |
+          npm ci
+          npm run build:package
+          npm run build:packages
+
+      - name: Publish template packages
+        id: publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PACKAGES='${{ needs.detect-template.outputs.packages }}'
+          PUBLISHED_PACKAGES=()
+          SKIPPED_PACKAGES=()
+
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          get_npm_tag() {
+            local version="$1"
+            if [[ "$BRANCH" =~ ^release/v([0-9]+)$ ]]; then echo "v${BASH_REMATCH[1]}";
+            elif [[ "$BRANCH" == "main" ]]; then
+              if [[ "$version" == *"-alpha"* ]]; then echo "alpha";
+              elif [[ "$version" == *"-rc"* ]]; then echo "next";
+              else echo "latest"; fi
+            elif [[ "$version" == *"-alpha"* ]]; then echo "alpha";
+            elif [[ "$version" == *"-beta"* ]]; then echo "beta";
+            elif [[ "$version" == *"-rc"* ]]; then echo "next";
+            else echo "latest"; fi
+          }
+
+          publish_with_retry() {
+            local tag="$1" max_attempts=3 attempt=1 delay=5
+            while [ $attempt -le $max_attempts ]; do
+              echo "Publish attempt $attempt of $max_attempts..."
+              if npm publish --access public --tag "$tag"; then return 0; fi
+              if [ $attempt -lt $max_attempts ]; then
+                echo "Attempt $attempt failed. Retrying in ${delay}s..."
+                sleep $delay; delay=$((delay * 2))
+              fi
+              attempt=$((attempt + 1))
+            done
+            echo "All $max_attempts attempts failed"; return 1
+          }
+
+          # Dependency order: leaf libs + the template lib first, then the
+          # packages that depend on them (framework → react → studio).
+          SORTED=$(echo "$PACKAGES" | jq -c 'sort_by(.name |
+            if . == "@gears-frontx/state" or . == "@gears-frontx/i18n" or . == "@gears-frontx/auth" or . == "@gears-frontx/frontx-template-shell" then 1
+            elif . == "@gears-frontx/framework" then 2
+            elif . == "@gears-frontx/react" then 3
+            elif . == "@gears-frontx/studio" then 4
+            else 5 end)')
+
+          echo "Publishing order:"
+          echo "$SORTED" | jq -r '.[] | "  - \(.name)@\(.version)"'
+
+          for row in $(echo "$SORTED" | jq -r '.[] | @base64'); do
+            _jq() { echo "${row}" | base64 --decode | jq -r "${1}"; }
+            NAME=$(_jq '.name'); PKG_PATH=$(_jq '.path'); VERSION=$(_jq '.version')
+
+            echo ""
+            echo "=========================================="
+            echo "Processing: $NAME@$VERSION"
+            echo "=========================================="
+
+            if npm view "$NAME@$VERSION" version 2>/dev/null; then
+              echo "SKIPPING: $NAME@$VERSION already exists on NPM"
+              SKIPPED_PACKAGES+=("{\"name\":\"$NAME\",\"version\":\"$VERSION\",\"reason\":\"already exists on NPM\"}")
+              continue
+            fi
+
+            NPM_TAG=$(get_npm_tag "$VERSION")
+            echo "Publishing $NAME@$VERSION with tag '$NPM_TAG'..."
+            ( cd "$PKG_PATH" && publish_with_retry "$NPM_TAG" ) || { echo "FAILED: $NAME@$VERSION"; exit 1; }
+
+            echo "SUCCESS: Published $NAME@$VERSION"
+            PUBLISHED_PACKAGES+=("{\"name\":\"$NAME\",\"version\":\"$VERSION\"}")
+          done
+
+          if [ ${#PUBLISHED_PACKAGES[@]} -eq 0 ]; then echo "published=[]" >> $GITHUB_OUTPUT;
+          else echo "published=$(printf '%s\n' "${PUBLISHED_PACKAGES[@]}" | jq -sc '.')" >> $GITHUB_OUTPUT; fi
+          if [ ${#SKIPPED_PACKAGES[@]} -eq 0 ]; then echo "skipped=[]" >> $GITHUB_OUTPUT;
+          else echo "skipped=$(printf '%s\n' "${SKIPPED_PACKAGES[@]}" | jq -sc '.')" >> $GITHUB_OUTPUT; fi
+
+  summary:
+    needs: [detect-template, publish-template]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish summary
+        run: |
+          echo "## Publish Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          report() {
+            local title="$1" has_changes="$2" result="$3" published="$4" skipped="$5"
+            echo "### $title" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            if [ "$has_changes" != "true" ]; then
+              echo "No packages with version changes to publish." >> $GITHUB_STEP_SUMMARY
+            elif [ "$result" == "success" ]; then
+              local pc sc
+              pc=$(echo "$published" | jq 'length'); sc=$(echo "$skipped" | jq 'length')
+              if [ "$pc" -gt 0 ]; then
+                echo "✅ Published ($pc):" >> $GITHUB_STEP_SUMMARY
+                echo "$published" | jq -r '.[] | "- `\(.name)@\(.version)`"' >> $GITHUB_STEP_SUMMARY
+              fi
+              if [ "$sc" -gt 0 ]; then
+                echo "⏭️ Skipped ($sc):" >> $GITHUB_STEP_SUMMARY
+                echo "$skipped" | jq -r '.[] | "- `\(.name)@\(.version)` — \(.reason)"' >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "❌ Publish failed. Check workflow logs for details." >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+          }
+
+          report "Shell template" \
+            "${{ needs.detect-template.outputs.has_changes }}" \
+            "${{ needs.publish-template.result }}" \
+            '${{ needs.publish-template.outputs.published }}' \
+            '${{ needs.publish-template.outputs.skipped }}'
