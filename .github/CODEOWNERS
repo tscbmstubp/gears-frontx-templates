@@ -1,0 +1,20 @@
+# Carried over from gears-frontx's own CODEOWNERS (see
+# `git show origin/develop:.github/CODEOWNERS` there), which owned
+# /template-shell/ and /template-mfe/ with this same team before the split,
+# under a repo-wide `* @GeraBart` default (he is the architect and owns
+# template and CLI design there). That catch-all is restored below so every
+# path with no more specific entry - package.json (where every policy:*
+# script is wired), vitest.config.mjs, the lockfiles, .npmrc, README.md,
+# CONTRIBUTING.md - still has a required reviewer, the same as it would in
+# the monorepo. template-design-guardrails/ had no separate entry upstream
+# but is a template like the other two, so it gets the same owners here.
+# scripts/ and .github/ are new entries, needed now that this repo carries
+# its own CI and tooling rather than inheriting the monorepo's.
+
+*                              @GeraBart
+
+/template-shell/              @gs-layer @itechmeat @tscbmstubp
+/template-mfe/                @gs-layer @itechmeat @tscbmstubp
+/template-design-guardrails/  @gs-layer @itechmeat @tscbmstubp
+/scripts/                     @gs-layer @itechmeat @tscbmstubp
+/.github/                     @gs-layer @itechmeat @tscbmstubp
