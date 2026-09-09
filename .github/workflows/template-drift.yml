@@ -1,0 +1,136 @@
+# Reverse-direction guard for the template registry pins (#518, moved here
+# when the templates left gears-frontx for their own repo).
+#
+# The templates pin @gears-frontx/* to exact registry versions, so ordinary
+# template validation resolves published tarballs and never a working-tree
+# ecosystem edit. That's deliberate - it validates what a seeded project
+# actually installs - but it also means a `gears-frontx` change that breaks
+# the template surface produces nothing red here until the next
+# publish-and-pin-bump cycle. See CONTRIBUTING.md's "Why Template Drift CI
+# installs without a lockfile" for the two install departures this job takes
+# on purpose.
+#
+# This job covers that gap without changing what template validation itself
+# validates: it checks out `gears-frontx`'s `develop` branch into a sibling
+# path, builds its packages, points the template's pins at that checkout
+# (`scripts/pin-template-ecosystem-to-local.mjs`, sibling mode), relinks
+# (`dev:template:link`), and runs the template's build and type-check against
+# it. Red here means the two repos have drifted - either side may have
+# moved; the pins on either side are not consulted.
+#
+# Path filters can't see a change in a DIFFERENT repository, so - unlike the
+# old in-monorepo version of this job - this cannot be push/PR-scoped to "did
+# anything relevant change": a `gears-frontx` change that breaks this template
+# is invisible to any push or PR made here. The daily schedule is what
+# actually catches that; push/PR here still runs it for template-side changes,
+# and workflow_dispatch covers an on-demand check.
+name: Template Drift
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  template-drift:
+    name: Template vs gears-frontx develop
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout templates repo
+      uses: actions/checkout@v5
+      with:
+        path: gears-frontx-templates
+        persist-credentials: false
+
+    # Sibling checkout, not a submodule: `FRONTX_ECOSYSTEM_DIR` (below) just
+    # needs a path with `packages/*` in it, and a plain checkout is the
+    # simplest thing that provides one without committing anything into this
+    # repo's own tree.
+    - name: Checkout gears-frontx develop
+      uses: actions/checkout@v5
+      with:
+        repository: constructorfabric/gears-frontx
+        ref: develop
+        path: gears-frontx
+        persist-credentials: false
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: '25.x'
+        cache: 'npm'
+        cache-dependency-path: |
+          gears-frontx/package-lock.json
+          gears-frontx-templates/template-shell/package-lock.json
+
+    - name: Enable Corepack
+      run: corepack enable
+
+    - name: Install and build gears-frontx ecosystem packages
+      working-directory: gears-frontx
+      run: |
+        npm ci
+        npm run build:packages
+
+    # Sibling mode (main.yml's own pin-drift step runs registry mode instead,
+    # since it has no gears-frontx checkout to point at): compares every
+    # exact ecosystem pin in the COMMITTED template manifests against this
+    # checkout's actual packages/* versions, before anything below rewrites
+    # those manifests. A pin that has drifted from develop is a real finding
+    # this job should report on its own terms, not something the rewrite
+    # below should silently paper over.
+    - name: Check template ecosystem pin-drift (sibling mode)
+      working-directory: gears-frontx-templates
+      env:
+        FRONTX_ECOSYSTEM_DIR: ${{ github.workspace }}/gears-frontx
+      run: npm run policy:template-pin-drift
+
+    # The link script refuses an unbuilt package: what the template resolves
+    # through each link is the package's dist/, so the working-tree surface
+    # under test only exists after the build above.
+    - name: Point template ecosystem pins at the gears-frontx checkout
+      working-directory: gears-frontx-templates
+      env:
+        FRONTX_ECOSYSTEM_DIR: ${{ github.workspace }}/gears-frontx
+      run: node scripts/pin-template-ecosystem-to-local.mjs
+
+    # `npm install`, not `npm ci` (the rewrite above desyncs the lockfile), and
+    # `--no-package-lock` avoids npm/cli#524. See CONTRIBUTING.md.
+    - name: Install template with the gears-frontx checkout's ecosystem packages
+      working-directory: gears-frontx-templates/template-shell
+      run: npm install --no-audit --no-fund --no-package-lock
+
+    # The rewrite is an install-time device and nothing more: the committed
+    # manifests come back before anything is built, so build and type-check
+    # read exactly the files a seeded project ships. Only tracked files are
+    # restored - the node_modules the install just produced is untracked and
+    # survives.
+    - name: Restore the committed template manifests
+      working-directory: gears-frontx-templates
+      run: git checkout -- template-shell
+
+    - name: Relink template at the gears-frontx checkout
+      working-directory: gears-frontx-templates
+      env:
+        FRONTX_ECOSYSTEM_DIR: ${{ github.workspace }}/gears-frontx
+      run: npm run dev:template:link
+
+    # Full `build`, not just the compile steps: vite bundling resolves the
+    # linked dist/ too, and type-check:app expects the generated MFE
+    # manifests. `build` does not type-check the app (vite strips types), so
+    # the explicit type-check after it is not redundant.
+    - name: Build template against the gears-frontx checkout
+      working-directory: gears-frontx-templates/template-shell
+      run: npm run build
+
+    - name: Type-check template against the gears-frontx checkout
+      working-directory: gears-frontx-templates/template-shell
+      run: npm run type-check

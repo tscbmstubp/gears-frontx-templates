@@ -1,0 +1,14 @@
+# Carried over from gears-frontx's own CODEOWNERS (see
+# `git show origin/develop:.github/CODEOWNERS` there), which owned
+# /template-shell/ and /template-mfe/ with this same team before the split.
+# template-design-guardrails/ had no separate entry upstream but is a
+# template like the other two, so it gets the same owners here. scripts/ and
+# .github/ are new entries: in the monorepo they fell under its own
+# repo-wide default owner, which has no reason to review a repo that is
+# nothing but templates and the tooling around them.
+
+/template-shell/              @gs-layer @itechmeat @tscbmstubp
+/template-mfe/                @gs-layer @itechmeat @tscbmstubp
+/template-design-guardrails/  @gs-layer @itechmeat @tscbmstubp
+/scripts/                     @gs-layer @itechmeat @tscbmstubp
+/.github/                     @gs-layer @itechmeat @tscbmstubp
