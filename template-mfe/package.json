@@ -1,0 +1,16 @@
+{
+  "//": "MONOREPO DEV HARNESS — NOT PART OF THIS TEMPLATE. This file is deliberately absent from frontx-template.json's ownershipBoundaries, so `frontx add` never copies it into a seeded project and this template claims ownership of no root package.json anywhere. The MFE packages below pin their @gears-frontx dependencies to exact published versions, which is what a seeded project installs. Inside THIS repo (templates only, no packages/api|gts-plugin|mfes on disk) those pins always resolve to the registry — the ecosystem packages live in gears-frontx and are consumed exactly as published, the same as a seeded project would. The overrides here redirect only the pins this repo CAN offer a local source for: template-shell/packages/* (react, auth, framework, i18n, state) and template-shell's own package, so an edit there is visible to an MFE's own direct imports without a publish round-trip. @gears-frontx/api, @gears-frontx/gts-plugin and @gears-frontx/mfes have no such override — their sources live in gears-frontx, not here — so edits to them reach this harness only after a real publish and a pin bump (`policy:template-pin-drift`), same as any other consumer. @gears-frontx/ui-kit is deliberately NOT overridden either, for the same reason plus one of its own: it is a published component library an MFE consumes, not a layer the MFE is developed against, so leaving it on its exact pin means the scaffold resolves exactly what a seeded project resolves — the whole point of depending on the kit rather than vendoring it. Because they redirect rather than re-declare, the installed versions still satisfy the pins and `npm ls` stays clean. Bootstrap order: template-shell as a whole (`npm run build`, which sequences its publishable package before its subpackages — they type-check against the declarations it emits, so the reverse order fails on @gears-frontx/framework) must be built before `npm install` here picks up its dist. Call template-shell's own `build` rather than its `build:package`/`build:packages` by hand; those two are order-sensitive. See this package's README for the exact sequence. Keep this file free of version numbers: every entry below is a path or a glob, so the pins remain the single place a version is written down.",
+  "name": "frontx-template-mfe-monorepo-harness",
+  "private": true,
+  "workspaces": [
+    "src-app/mfe_packages/*"
+  ],
+  "overrides": {
+    "@gears-frontx/frontx-template-shell": "file:../template-shell",
+    "@gears-frontx/auth": "file:../template-shell/packages/auth",
+    "@gears-frontx/framework": "file:../template-shell/packages/framework",
+    "@gears-frontx/i18n": "file:../template-shell/packages/i18n",
+    "@gears-frontx/react": "file:../template-shell/packages/react",
+    "@gears-frontx/state": "file:../template-shell/packages/state"
+  }
+}
