@@ -28,7 +28,7 @@ import { parseArgs, expandMatrix, resolveServerCwd, shotName, USAGE } from './co
 import { CdpSession, newTarget } from './cdp.mjs';
 import { findChrome, launchChrome } from './chrome.mjs';
 import { isUrlReachable, waitForUrl, startServer } from './server.mjs';
-import { buildReport, diffReports, exitCode, summaryLines } from './report.mjs';
+import { buildReport, diffReports, exitCode, splitSweep, summaryLines } from './report.mjs';
 
 const SWEEP_LINE = /\[design-defects\]/;
 const VERIFY_PKG_FAILURE = /\[verify-packages\].*(none installed|failed to load)/;
@@ -205,7 +205,7 @@ async function main() {
       } else if (!Array.isArray(sweep.value)) {
         record.environmentError = `sweep returned a non-array: ${JSON.stringify(sweep.value)}`;
       } else {
-        record.findings = sweep.value;
+        Object.assign(record, splitSweep(sweep.value));
       }
       record.consoleLines = session.consoleLines.slice(before);
 
@@ -223,13 +223,14 @@ async function main() {
       }
       states.push(record);
       const count = record.findings?.length;
+      const undecided = record.needsReview?.length ?? 0;
       console.log(
         `design-verify: ${route} ${theme} ${width}px - ` +
           (record.environmentError
             ? `ENVIRONMENT: ${record.environmentError}`
-            : count === 0
+            : count === 0 && undecided === 0
               ? 'clean'
-              : `${count} finding(s)`) +
+              : `${count} finding(s)` + (undecided > 0 ? `, ${undecided} needing review` : '')) +
           (record.screenshotError ? ` - SCREENSHOT FAILED: ${record.screenshotError}` : ''),
       );
     }
@@ -250,6 +251,7 @@ async function main() {
 /**
  * @typedef {{route: string, theme: string, width: number,
  *   findings?: Array<{id?: string, detail?: string, target?: string}>,
+ *   needsReview?: Array<{id?: string, detail?: string, target?: string}>,
  *   environmentError?: string, screenshot?: string, screenshotError?: string,
  *   consoleLines?: string[]}} StateRecord
  */

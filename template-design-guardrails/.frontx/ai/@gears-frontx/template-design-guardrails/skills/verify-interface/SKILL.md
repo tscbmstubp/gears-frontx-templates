@@ -33,7 +33,8 @@ cleanliness are distinguishable — trust the lines, not guesses:
 - `[verify-packages] … failed to load: …` — a real error; report it as a
   blocking environment finding with the logged cause.
 - `[design-defects] clean: no objective design defects detected` (or
-  `[design-defects]` defect lines) — the checker is running; proceed.
+  `[design-defects]` finding or `needs review` lines) — the checker is
+  running; proceed.
 
 ## Run
 
@@ -49,7 +50,8 @@ npm run verify:ui --workspace=@gears-frontx/design-verify -- \
 to `design-verify-report/`. Scope a fix-loop re-run per the tiering rule
 below by passing a single screen, width, and theme. Findings in
 `findings.json` carry the same rule ids as the console lines; map them with
-the same table. States the runner cannot reach (data states behind user
+the same table. Checks the sweep could not decide sit in each state's
+`needsReview` list instead, and a state with any is not counted clean. States the runner cannot reach (data states behind user
 actions, transient pending states) still need the manual protocol below —
 name them unverified if neither path reached them.
 
@@ -118,6 +120,7 @@ the runner overwrites it in place.
 The checker reports stable rule ids. Map them before reporting; never forward raw ids without the gate context:
 
 - `axe/color-contrast` → COL/A11Y contrast gates (pick the single matching gate ID from `quality-gates.json` and carry its severity) — this is the one axe rule the jsdom test suite cannot run, so treat it as new evidence, not duplication;
+- `axe-incomplete/color-contrast` (console: `needs review`; runner: `needsReview`) — axe could not decide the contrast, typically text over a gradient or an image, or behind another element; its detail names the reason → COL-001 unverified, not a pass and not a confirmed finding: list the element with axe's reason among the unverified items, never count its state as clean, and check the contrast there by hand (the colors actually painted behind the text) before claiming COL-001;
 - other `axe/*` findings (labels, landmarks, list semantics, heading-one) → the single closest A11Y/structure gate ID;
 - `page-horizontal-scroll` (the document, or the box the page's content scrolls in, scrolls sideways) → LAY-002 (blocker at 320 CSS px);
 - `tiny-text` (visible text below the kit's mono size, `--text-mono-size`), `small-control-text` (text on a button, link, form control or its label below the kit's label size, `--text-label-size`) and `clipped-text` (clipped without ellipsis) → the single closest TYP or layout/density gate ID; the floors are read from the installed tokens, so the fix is always the kit's own role, never an arbitrary size;
@@ -140,7 +143,7 @@ Return, in `quality-gates.json` finding shape:
 - confirmed findings first, each with rule ID (`ruleId`), severity, location (`location` — the element locator), evidence (the verbatim `[design-defects]` console line or raw `window.__frontxDesignDefects()` return entry — a paraphrased rule id alone is not evidence), impact (why it matters), correction (the proposed fix), and verification (e.g. re-run the sweep after the fix);
 - states and widths that were exercised and came back clean — cleanliness is a result, name it; a clean-sweep claim must quote the `[design-defects] clean:` line;
 - the final visual review's findings, or the statement that it was done and found nothing, naming the screens, themes and widths whose screenshots were reviewed — a report without it is not a completed verification;
-- states you could not reach, listed as still unverified — an unreached state is not a pass;
+- states you could not reach, listed as still unverified — an unreached state is not a pass — and every `axe-incomplete/color-contrast` entry with its state and axe's reason;
 - whether the automatic sweep and at least one on-demand re-run both completed.
 
 A completion claim must be backed by the closing full pass; a scoped fix-loop

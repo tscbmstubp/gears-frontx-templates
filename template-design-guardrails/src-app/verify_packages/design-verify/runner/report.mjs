@@ -4,7 +4,9 @@
  *
  * Exit-code contract:
  *   0 - the matrix ran; findings (if any) are advisory
- *   1 - findings present AND --fail-on-findings was passed
+ *   1 - findings present AND --fail-on-findings was passed (entries the
+ *       checker could not decide - needsReview - are not findings and
+ *       never gate)
  *   2 - environment failure: some state could not produce evidence (checker
  *       absent, page unreachable, sweep threw), or a screenshot the run was
  *       asked for (--screenshots) could not be captured or written. Never
@@ -16,9 +18,25 @@
 /**
  * @typedef {{route: string, theme: string, width: number,
  *   findings?: Array<{id?: string, detail?: string, target?: string}>,
+ *   needsReview?: Array<{id?: string, detail?: string, target?: string}>,
  *   environmentError?: string, screenshot?: string, screenshotError?: string,
  *   consoleLines?: string[]}} StateResult
  */
+
+/**
+ * Splits a sweep's resolved entries into findings and the checks the checker
+ * could not decide (kind 'needs-review', such as contrast axe left
+ * incomplete). Only findings feed --fail-on-findings and the baseline diff;
+ * the others keep their state from counting as clean.
+ *
+ * @param {Array<{id?: string, detail?: string, target?: string, kind?: string}>} entries
+ */
+export function splitSweep(entries) {
+  const findings = [];
+  const needsReview = [];
+  for (const entry of entries) (entry.kind === 'needs-review' ? needsReview : findings).push(entry);
+  return { findings, needsReview };
+}
 
 /**
  * @param {{baseUrl: string, themeKey: string}} meta
@@ -27,6 +45,7 @@
 export function buildReport(meta, states) {
   const byRule = {};
   let totalFindings = 0;
+  let needsReview = 0;
   let statesClean = 0;
   let environmentFailures = 0;
   let screenshotFailures = 0;
@@ -41,7 +60,10 @@ export function buildReport(meta, states) {
     if (screenshotMissing) screenshotFailures += 1;
     const findings = state.findings ?? [];
     totalFindings += findings.length;
-    if (findings.length === 0 && !screenshotMissing) statesClean += 1;
+    // A check the sweep could not decide is not a pass either.
+    const undecided = state.needsReview ?? [];
+    needsReview += undecided.length;
+    if (findings.length === 0 && undecided.length === 0 && !screenshotMissing) statesClean += 1;
     for (const finding of findings) {
       const rule = finding.id ?? 'unknown-rule';
       byRule[rule] = (byRule[rule] ?? 0) + 1;
@@ -58,6 +80,7 @@ export function buildReport(meta, states) {
       environmentFailures,
       screenshotFailures,
       totalFindings,
+      needsReview,
       byRule,
     },
     states,
@@ -206,7 +229,8 @@ export function summaryLines(report, diff) {
   const s = report.summary;
   const lines = [
     `design-verify: ${s.statesRun} state(s) swept - ${s.statesClean} clean, ` +
-      `${s.totalFindings} finding(s), ${s.environmentFailures} environment failure(s), ` +
+      `${s.totalFindings} finding(s), ${s.needsReview} needing review, ` +
+      `${s.environmentFailures} environment failure(s), ` +
       `${s.screenshotFailures} screenshot failure(s)`,
   ];
   if (diff) {
@@ -235,6 +259,12 @@ export function summaryLines(report, diff) {
     } else if (state.screenshotError) {
       lines.push(
         `  SCREENSHOT ${state.route} ${state.theme} ${state.width}px: ${state.screenshotError}`,
+      );
+    }
+    for (const entry of state.needsReview ?? []) {
+      lines.push(
+        `  NEEDS REVIEW ${state.route} ${state.theme} ${state.width}px: ${entry.id ?? 'unknown-rule'}` +
+          (entry.target ? ` @ ${entry.target}` : ''),
       );
     }
   }

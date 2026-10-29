@@ -14,6 +14,7 @@ import {
   MIN_CARD_PADDING_PX,
   SCROLL_EDGE_TOLERANCE_PX,
   TINY_TEXT_PX,
+  axeResultsToFindings,
   clipInkToScrollers,
   collectHeadingSkipFindings,
   findCardEdgeFlush,
@@ -27,6 +28,7 @@ import {
   isTinyText,
   parseCssLengthPx,
   readTextFloors,
+  runDesignDefectCheck,
   scrollsSideways,
   shareVisualRow,
   soleLayoutChild,
@@ -34,12 +36,13 @@ import {
 } from '../src/designDefects';
 import type { LayoutRole } from '../src/designDefects';
 
-// axe-core's collection is stubbed to reject so the sweep-failure test below
-// (K-002) can assert the rejection is caught, not left as an unhandled
-// rejection.
+// axe-core's run is stubbed per test: the sweep-failure test below (K-002)
+// makes it reject to assert the rejection is caught, not left as an
+// unhandled rejection, and the console tests hand it results.
+const axeRun = vi.hoisted(() => vi.fn());
 vi.mock('axe-core', () => ({
   default: {
-    run: () => Promise.reject(new Error('axe-core failed to run')),
+    run: axeRun,
   },
 }));
 
@@ -508,6 +511,7 @@ describe('installDesignDefectCheck sweep failure', () => {
 
   it('catches a rejected sweep instead of leaving an unhandled rejection', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    axeRun.mockRejectedValueOnce(new Error('axe-core failed to run'));
 
     installDesignDefectCheck(0);
     // Real timers: let the scheduled sweep (and the mocked axe-core
@@ -515,5 +519,110 @@ describe('installDesignDefectCheck sweep failure', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(errorSpy).toHaveBeenCalledWith('[design-defects] sweep failed:', expect.any(Error));
+  });
+});
+
+describe('axeResultsToFindings', () => {
+  // Only the fields the mapping reads; axe's own result objects carry more.
+  function result(id: string, nodes: Array<{ target: string[]; messages: string[] }>, extra: Record<string, unknown> = {}) {
+    return {
+      id,
+      help: `${id} help`,
+      impact: 'serious',
+      nodes: nodes.map((node) => ({
+        target: node.target,
+        any: node.messages.map((message) => ({ id: 'check', message })),
+        all: [],
+        none: [],
+      })),
+      ...extra,
+    };
+  }
+
+  function map(violations: unknown[], incomplete: unknown[]) {
+    return axeResultsToFindings({ violations, incomplete } as unknown as Parameters<typeof axeResultsToFindings>[0]);
+  }
+
+  it('maps each violation to a defect, as before', () => {
+    expect(map([result('color-contrast', [{ target: ['p'], messages: ['2.32:1'] }, { target: ['span'], messages: [] }])], [])).toEqual([
+      {
+        id: 'axe/color-contrast',
+        detail: 'color-contrast help (impact: serious, 2 node(s))',
+        target: 'p',
+      },
+    ]);
+  });
+
+  it('reports each node axe could not decide the contrast of as needing review, with its own target and reasons', () => {
+    const gradient = "Element's background color could not be determined due to a background gradient";
+    const overlapped = "Element's background color could not be determined because it's overlapped by another element";
+    const findings = map(
+      [],
+      [
+        result('color-contrast', [
+          { target: ['p.synced'], messages: [gradient] },
+          { target: ['span.hint'], messages: [gradient, gradient] },
+          { target: ['em'], messages: [overlapped, gradient] },
+        ]),
+      ]
+    );
+
+    expect(findings).toEqual([
+      { id: 'axe-incomplete/color-contrast', detail: `axe could not decide this: ${gradient}`, target: 'p.synced', kind: 'needs-review' },
+      { id: 'axe-incomplete/color-contrast', detail: `axe could not decide this: ${gradient}`, target: 'span.hint', kind: 'needs-review' },
+      {
+        id: 'axe-incomplete/color-contrast',
+        detail: `axe could not decide this: ${overlapped}; ${gradient}`,
+        target: 'em',
+        kind: 'needs-review',
+      },
+    ]);
+  });
+
+  it("leaves out other rules' undecided results and empty ones", () => {
+    expect(map([], [result('aria-valid-attr-value', [{ target: ['div'], messages: ['?'] }]), result('color-contrast', [])])).toEqual([]);
+  });
+});
+
+describe('runDesignDefectCheck console output', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('prints the clean line only when nothing was found and nothing is undecided', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    axeRun.mockResolvedValueOnce({ violations: [], incomplete: [] });
+
+    expect(await runDesignDefectCheck()).toEqual([]);
+    expect(info).toHaveBeenCalledWith('[design-defects] clean: no objective design defects detected');
+  });
+
+  it('lists undecided contrast as needing review instead of printing the clean line', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    axeRun.mockResolvedValueOnce({
+      violations: [],
+      incomplete: [
+        {
+          id: 'color-contrast',
+          help: 'h',
+          nodes: [{ target: ['p.synced'], any: [{ message: 'background gradient' }], all: [], none: [] }],
+        },
+      ],
+    });
+
+    const findings = await runDesignDefectCheck();
+
+    expect(findings).toEqual([expect.objectContaining({ id: 'axe-incomplete/color-contrast', kind: 'needs-review' })]);
+    // Both kinds in full: axe keeps one node per result for a type left out.
+    expect(axeRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ resultTypes: ['violations', 'incomplete'] }),
+    );
+    expect(info).not.toHaveBeenCalled();
+    expect(warn.mock.calls.map(([line]) => line)).toEqual([
+      '[design-defects] 1 item(s) need review — undecided, so this state is not clean:',
+      '[design-defects] needs review axe-incomplete/color-contrast: axe could not decide this: background gradient — p.synced',
+    ]);
   });
 });

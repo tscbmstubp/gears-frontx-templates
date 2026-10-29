@@ -7,7 +7,8 @@
  *
  *   - axe-core over the live document, including the color-contrast rule
  *     (browser-only: it needs real paint) — axe traverses open shadow roots,
- *     so MFE content is covered;
+ *     so MFE content is covered; contrast axe cannot decide (text over a
+ *     gradient or an image) is reported as needing review, not dropped;
  *   - page-level horizontal scroll (the layout contract every screen must
  *     keep: wide content scrolls in its own container, never the page),
  *     measured on the document and on every box the main landmark's content
@@ -44,6 +45,8 @@
  * copied, with axe-core supplying the contrast engine.
  */
 
+import type { AxeResults } from 'axe-core';
+
 export interface DesignDefectFinding {
   /** Stable rule id, e.g. 'axe/color-contrast', 'tiny-text'. */
   id: string;
@@ -51,6 +54,12 @@ export interface DesignDefectFinding {
   detail: string;
   /** Best-effort locator for the offending element. */
   target?: string;
+  /**
+   * 'needs-review' marks a check the sweep could not decide (axe's
+   * incomplete color-contrast results): not a defect, and not a pass either,
+   * so a sweep that has one does not print the clean line.
+   */
+  kind?: 'needs-review';
 }
 
 /**
@@ -970,30 +979,77 @@ function collectLayoutFindings(): DesignDefectFinding[] {
   return findings;
 }
 
-async function collectAxeFindings(): Promise<DesignDefectFinding[]> {
-  const axe = (await import('axe-core')).default;
-  const result = await axe.run(
-    { exclude: [['.studio-panel'], ['.studio-portal-container']] },
-    { resultTypes: ['violations'] }
-  );
-  return result.violations.map((violation) => ({
+/**
+ * Rules whose undecided (axe "incomplete") results are reported as needing
+ * review. color-contrast is the one the verification leans on as objective
+ * evidence, and axe leaves it undecided whenever it cannot resolve the
+ * background: text over a gradient or an image, or behind another element.
+ */
+const UNDECIDED_RULES_REPORTED = new Set(['color-contrast']);
+
+/**
+ * Maps an axe run to findings: each violation as a defect, and each node of
+ * an undecided result of a rule in UNDECIDED_RULES_REPORTED as its own
+ * needs-review entry, with that node's target and axe's reasons for it, since
+ * each element needs its own check by hand. Pure; exported for unit tests.
+ */
+export function axeResultsToFindings(results: Pick<AxeResults, 'violations' | 'incomplete'>): DesignDefectFinding[] {
+  const violations = results.violations.map((violation) => ({
     id: `axe/${violation.id}`,
     detail: `${violation.help} (impact: ${violation.impact ?? 'unknown'}, ${violation.nodes.length} node(s))`,
     target: violation.nodes[0]?.target?.join(' '),
   }));
+  const undecided = results.incomplete
+    .filter((result) => UNDECIDED_RULES_REPORTED.has(result.id))
+    .flatMap((result) =>
+      result.nodes.map((node): DesignDefectFinding => {
+        const reasons = new Set([...node.any, ...node.all, ...node.none].map((check) => check.message));
+        return {
+          id: `axe-incomplete/${result.id}`,
+          detail: `axe could not decide this: ${[...reasons].join('; ')}`,
+          target: node.target?.join(' '),
+          kind: 'needs-review',
+        };
+      })
+    );
+  return [...violations, ...undecided];
 }
 
-/** Runs the full sweep and reports to the console. Resolves with findings. */
+async function collectAxeFindings(): Promise<DesignDefectFinding[]> {
+  const axe = (await import('axe-core')).default;
+  // Both kinds in full: axe keeps one node per result for a type left out.
+  const result = await axe.run(
+    { exclude: [['.studio-panel'], ['.studio-portal-container']] },
+    { resultTypes: ['violations', 'incomplete'] }
+  );
+  return axeResultsToFindings(result);
+}
+
+function consoleLine(finding: DesignDefectFinding): string {
+  return `${finding.id}: ${finding.detail}${finding.target ? ` — ${finding.target}` : ''}`;
+}
+
+/**
+ * Runs the full sweep and reports to the console. Resolves with findings,
+ * needs-review entries included. The clean line prints only when there is
+ * neither: a check the sweep could not decide is not a pass.
+ */
 export async function runDesignDefectCheck(): Promise<DesignDefectFinding[]> {
   const findings = [...collectLayoutFindings(), ...(await collectAxeFindings())];
+  const defects = findings.filter((finding) => finding.kind !== 'needs-review');
+  const needsReview = findings.filter((finding) => finding.kind === 'needs-review');
 
   if (findings.length === 0) {
     console.info('[design-defects] clean: no objective design defects detected');
-  } else {
-    console.warn(`[design-defects] ${findings.length} finding(s):`);
-    for (const finding of findings) {
-      console.warn(`[design-defects] ${finding.id}: ${finding.detail}${finding.target ? ` — ${finding.target}` : ''}`);
-    }
+    return findings;
+  }
+  if (defects.length > 0) {
+    console.warn(`[design-defects] ${defects.length} finding(s):`);
+    for (const finding of defects) console.warn(`[design-defects] ${consoleLine(finding)}`);
+  }
+  if (needsReview.length > 0) {
+    console.warn(`[design-defects] ${needsReview.length} item(s) need review — undecided, so this state is not clean:`);
+    for (const finding of needsReview) console.warn(`[design-defects] needs review ${consoleLine(finding)}`);
   }
   return findings;
 }

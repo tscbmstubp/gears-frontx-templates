@@ -12,7 +12,7 @@ import {
   routeSlug,
   shotName,
 } from '../runner/config.mjs';
-import { buildReport, diffReports, exitCode, summaryLines } from '../runner/report.mjs';
+import { buildReport, diffReports, exitCode, splitSweep, summaryLines } from '../runner/report.mjs';
 import {
   CHROME_CANDIDATES,
   discoverCacheChromes,
@@ -122,9 +122,29 @@ describe('report', () => {
       environmentFailures: 1,
       screenshotFailures: 0,
       totalFindings: 2,
+      needsReview: 0,
       byRule: { 'page-horizontal-scroll': 1, 'tiny-text': 1 },
     });
     expect(summaryLines(report).join('\n')).toContain('ENVIRONMENT /x light 1440px');
+  });
+
+  // A check the checker could not decide (axe's incomplete contrast) is not a
+  // defect, so it neither counts as a finding nor gates --fail-on-findings;
+  // it is not a pass either, so its state is not clean.
+  it('keeps undecided checks out of the findings and their state out of clean', () => {
+    const meta = { baseUrl: 'u', themeKey: 'k' };
+    const undecided = { id: 'axe-incomplete/color-contrast', detail: 'background gradient', target: 'p.synced', kind: 'needs-review' };
+    const defect = { id: 'tiny-text', detail: '8px' };
+    expect(splitSweep([defect, undecided])).toEqual({ findings: [defect], needsReview: [undecided] });
+
+    const review = { route: '/', theme: 'light', width: 320, ...splitSweep([undecided]) };
+    const report = buildReport(meta, [clean, review]);
+    expect(report.summary).toMatchObject({ statesRun: 2, statesClean: 1, totalFindings: 0, needsReview: 1, byRule: {} });
+    expect(exitCode(report, { failOnFindings: true })).toBe(0);
+    expect(exitCode(report, { failOnFindings: true }, diffReports(report, report))).toBe(0);
+    const summary = summaryLines(report).join('\n');
+    expect(summary).toContain('0 finding(s), 1 needing review');
+    expect(summary).toContain('NEEDS REVIEW / light 320px: axe-incomplete/color-contrast @ p.synced');
   });
 
   it('parses --baseline as a value flag', () => {

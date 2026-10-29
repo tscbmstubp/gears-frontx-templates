@@ -1,6 +1,6 @@
 # FrontX design guardrails
 
-Version: `0.1.0-alpha.2`  
+Version: `0.1.0-alpha.3`  
 UI base: `@gears-frontx/ui-kit`  
 Scope: interface generation and advisory design review
 
